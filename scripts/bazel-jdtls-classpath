@@ -1,0 +1,88 @@
+#!/bin/bash
+# Extract classpath information from Bazel for jdtls
+# Usage: bazel-jdtls-classpath [target-pattern]
+#   e.g., bazel-jdtls-classpath //domains/event-platform/...
+
+set -e
+
+TARGET_PATTERN="${1:-//...}"
+OUTPUT_DIR="${2:-$HOME/.cache/jdtls-bazel}"
+
+mkdir -p "$OUTPUT_DIR"
+
+echo "Extracting classpath for: $TARGET_PATTERN" >&2
+
+# Get all Java targets
+echo "Finding Java targets..." >&2
+JAVA_TARGETS=$(bazel query "kind('java_.*', $TARGET_PATTERN)" 2>/dev/null)
+
+if [ -z "$JAVA_TARGETS" ]; then
+  echo "No Java targets found for pattern: $TARGET_PATTERN" >&2
+  exit 1
+fi
+
+# Get all JAR dependencies in batches (to avoid query limits)
+TARGET_COUNT=$(echo "$JAVA_TARGETS" | wc -l | tr -d ' ')
+echo "Found $TARGET_COUNT Java targets" >&2
+echo "Resolving dependencies (this may take a few minutes)..." >&2
+
+# Clear the output file
+> "$OUTPUT_DIR/classpath.txt"
+
+# Process in batches of 100 targets to avoid query size limits
+BATCH_SIZE=100
+BATCH_NUM=0
+echo "$JAVA_TARGETS" | while read -r target; do
+  echo "$target"
+done | split -l $BATCH_SIZE - "$OUTPUT_DIR/batch-"
+
+# Process each batch
+for batch_file in "$OUTPUT_DIR"/batch-*; do
+  BATCH_NUM=$((BATCH_NUM + 1))
+  BATCH_COUNT=$(wc -l < "$batch_file")
+  echo "Processing batch $BATCH_NUM ($BATCH_COUNT targets)..." >&2
+
+  # Build query for this batch
+  BATCH_QUERY=$(cat "$batch_file" | sed 's|.*|deps(&)|' | paste -sd '+' -)
+
+  # Run bazel cquery and append to classpath (show errors but continue)
+  if ! bazel cquery "$BATCH_QUERY" --output=files 2>&1 | grep "\.jar$" >> "$OUTPUT_DIR/classpath.txt"; then
+    echo "Warning: Some dependencies in batch $BATCH_NUM may have failed" >&2
+  fi
+
+  rm "$batch_file"
+done
+
+# Remove duplicates
+sort -u "$OUTPUT_DIR/classpath.txt" -o "$OUTPUT_DIR/classpath.txt"
+
+# Get all source directories
+echo "Finding source directories..." >&2
+echo "$JAVA_TARGETS" | while read -r target; do
+  # Convert //domains/event-platform/libs/topology:topology
+  # to domains/event-platform/libs/topology
+  pkg=$(echo "$target" | sed 's|//||' | sed 's|:.*||')
+
+  # Standard Maven structure
+  echo "$pkg/src/main/java"
+  echo "$pkg/src/test/java"
+
+  # Check for generated sources
+  echo "bazel-bin/$pkg"
+done | sort -u > "$OUTPUT_DIR/sources.txt"
+
+# Add bazel-bin for all generated sources (proto, etc.)
+echo "bazel-bin" >> "$OUTPUT_DIR/sources.txt"
+echo "bazel-out/darwin_arm64-fastbuild/bin" >> "$OUTPUT_DIR/sources.txt"
+
+# Convert to absolute paths
+REPO_ROOT=$(bazel info workspace 2>/dev/null)
+sed -i.bak "s|^|$REPO_ROOT/|" "$OUTPUT_DIR/classpath.txt"
+sed -i.bak "s|^|$REPO_ROOT/|" "$OUTPUT_DIR/sources.txt"
+rm -f "$OUTPUT_DIR"/*.bak
+
+echo "" >&2
+echo "✓ Classpath written to: $OUTPUT_DIR/classpath.txt" >&2
+echo "✓ Sources written to: $OUTPUT_DIR/sources.txt" >&2
+echo "✓ Total JARs: $(wc -l < "$OUTPUT_DIR/classpath.txt")" >&2
+echo "✓ Total sources: $(wc -l < "$OUTPUT_DIR/sources.txt")" >&2

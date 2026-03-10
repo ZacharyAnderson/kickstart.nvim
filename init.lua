@@ -597,7 +597,7 @@ require('lazy').setup({
         jsonls = {},
         marksman = {},
         zls = {},
-        jdtls = {},
+        -- jdtls = {}, -- handled by nvim-jdtls plugin with Bazel support
         -- rust_analyzer = {},
         -- ... etc. See `:help lspconfig-all` for a list of all the pre-configured LSPs
         --
@@ -688,12 +688,20 @@ require('lazy').setup({
         local disable_filetypes = { c = true, cpp = true }
         if disable_filetypes[vim.bo[bufnr].filetype] then
           return nil
-        else
+        end
+
+        -- For Java files, use longer timeout for bzl formatter
+        if vim.bo[bufnr].filetype == 'java' then
           return {
-            timeout_ms = 500,
+            timeout_ms = 10000,
             lsp_format = 'fallback',
           }
         end
+
+        return {
+          timeout_ms = 500,
+          lsp_format = 'fallback',
+        }
       end,
       formatters_by_ft = {
         lua = { 'stylua' },
@@ -703,6 +711,18 @@ require('lazy').setup({
         -- You can use 'stop_after_first' to run the first available formatter from the list
         javascript = { 'prettierd', 'prettier', stop_after_first = true },
         json = { 'jq' },
+        java = { 'bzl_format_java' },
+      },
+      formatters = {
+        bzl_format_java = {
+          command = 'bzl',
+          args = { 'run', '//rules/format:format_java', '--', '$FILENAME' },
+          stdin = false,
+          -- Only use this formatter when in the logs-backend repo
+          condition = function(self, ctx)
+            return ctx.dirname:match 'logs%-backend' ~= nil
+          end,
+        },
       },
     },
   },
